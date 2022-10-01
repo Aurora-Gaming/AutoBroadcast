@@ -12,218 +12,122 @@ using Terraria;
 using TerrariaApi.Server;
 using TShockAPI;
 using TShockAPI.Hooks;
+using Timer = System.Timers.Timer;
 
-namespace AutoBroadcast
+namespace AutoBroadcast;
+
+[ApiVersion(2, 1)]
+public class AutoBroadcast : TerrariaPlugin
 {
-	[ApiVersion(2, 1)]
-	public class AutoBroadcast : TerrariaPlugin
+	public override string Name { get { return "AutoBroadcast"; } }
+	public override string Author { get { return "Maintained by Zaicon"; } }
+	public override string Description { get { return "Automatically Broadcast a Message or Command every x seconds"; } }
+	public override Version Version { get { return Assembly.GetExecutingAssembly().GetName().Version; } }
+
+	public static string ConfigPath { get { return Path.Combine(TShock.SavePath, "AutoBroadcastConfig.json"); } }
+	public ABConfig Config = new();
+
+	public AutoBroadcast(Main Game) : base(Game) { }
+
+	static readonly Timer Update = new(1000);
+	public static bool ULock = false;
+	public const int UpdateTimeout = 501;
+
+	public override void Initialize()
 	{
-		public override string Name { get { return "AutoBroadcast"; } }
-		public override string Author { get { return "Maintained by Zaicon"; } }
-		public override string Description { get { return "Automatically Broadcast a Message or Command every x seconds"; } }
-		public override Version Version { get { return Assembly.GetExecutingAssembly().GetName().Version; } }
+		ServerApi.Hooks.GameInitialize.Register(this, OnInitialize, -5);
+		ServerApi.Hooks.ServerChat.Register(this, OnChat);
+		RegionHooks.RegionEntered += OnRegionEnter;
+		GeneralHooks.ReloadEvent += AutoBC;
+	}
 
-		public string ConfigPath { get { return Path.Combine(TShock.SavePath, "AutoBroadcastConfig.json"); } }
-		public ABConfig Config = new ABConfig();
-
-		public AutoBroadcast(Main Game) : base(Game) { }
-
-		static readonly Timer Update = new Timer(1000);
-		public static bool ULock = false;
-		public const int UpdateTimeout = 501;
-
-		public override void Initialize()
+	protected override void Dispose(bool Disposing)
+	{
+		if (Disposing)
 		{
-			ServerApi.Hooks.GameInitialize.Register(this, OnInitialize, -5);
-			ServerApi.Hooks.ServerChat.Register(this, OnChat);
-			RegionHooks.RegionEntered += OnRegionEnter;
-			GeneralHooks.ReloadEvent += AutoBC;
+			ServerApi.Hooks.GameInitialize.Deregister(this, OnInitialize);
+			ServerApi.Hooks.ServerChat.Deregister(this, OnChat);
+			RegionHooks.RegionEntered -= OnRegionEnter;
+			GeneralHooks.ReloadEvent -= AutoBC;
+			Update.Elapsed -= OnUpdate;
+			Update.Stop();
 		}
+		base.Dispose(Disposing);
+	}
 
-		protected override void Dispose(bool Disposing)
+	public void OnInitialize(EventArgs args)
+	{
+		try
 		{
-			if (Disposing)
-			{
-				ServerApi.Hooks.GameInitialize.Deregister(this, OnInitialize);
-				ServerApi.Hooks.ServerChat.Deregister(this, OnChat);
-				RegionHooks.RegionEntered -= OnRegionEnter;
-				GeneralHooks.ReloadEvent -= AutoBC;
-				Update.Elapsed -= OnUpdate;
-				Update.Stop();
-			}
-			base.Dispose(Disposing);
+			Config = ABConfig.Read(ConfigPath).Write(ConfigPath);
 		}
-
-		public void OnInitialize(EventArgs args)
+		catch (Exception ex)
 		{
-			try
-			{
-				Config = ABConfig.Read(ConfigPath).Write(ConfigPath);
-			}
-			catch (Exception ex)
-			{
-				Config = new ABConfig();
-				TShock.Log.ConsoleError("[AutoBroadcast] An exception occurred while parsing the AutoBroadcast config!\n{0}".SFormat(ex.ToString()));
-			}
-			Update.Elapsed += OnUpdate;
-			Update.Start();
+			Config = new ABConfig();
+			TShock.Log.ConsoleError("[AutoBroadcast] An exception occurred while parsing the AutoBroadcast config!\n{0}".SFormat(ex.ToString()));
 		}
+		Update.Elapsed += OnUpdate;
+		Update.Start();
+	}
 
-		public void AutoBC(ReloadEventArgs args)
+	public void AutoBC(ReloadEventArgs args)
+	{
+		try
 		{
-			try
-			{
-				Config = ABConfig.Read(ConfigPath).Write(ConfigPath);
-				TShock.Log.Info("Successfully reloaded AutoBroadcast config!");
-			}
-			catch (Exception ex)
-			{
-				Config = new ABConfig();
-				args.Player.SendWarningMessage("An exception occurred while parsing the AutoBroadcast config! check logs for more details!");
-				TShock.Log.ConsoleError("[AutoBroadcast] An exception occurred while parsing the AutoBroadcast config!\n{0}".SFormat(ex.ToString()));
-			}
+			Config = ABConfig.Read(ConfigPath).Write(ConfigPath);
+			TShock.Log.Info("Successfully reloaded AutoBroadcast config!");
 		}
-
-		#region Chat
-		public void OnChat(ServerChatEventArgs args)
+		catch (Exception ex)
 		{
-			var Start = DateTime.Now;
-			var PlayerGroup = TShock.Players[args.Who].Group.Name;
+			Config = new ABConfig();
+			args.Player.SendWarningMessage("An exception occurred while parsing the AutoBroadcast config! check logs for more details!");
+			TShock.Log.ConsoleError("[AutoBroadcast] An exception occurred while parsing the AutoBroadcast config!\n{0}".SFormat(ex.ToString()));
+		}
+	}
 
-			lock (Config.Broadcasts)
-				foreach (var broadcast in Config.Broadcasts)
+	#region Chat
+	public void OnChat(ServerChatEventArgs args)
+	{
+		var Start = DateTime.Now;
+		var PlayerGroup = TShock.Players[args.Who].Group.Name;
+
+		lock (Config.Broadcasts)
+			foreach (var broadcast in Config.Broadcasts)
+			{
+				string[] Groups = Array.Empty<string>();
+				string[] Messages = Array.Empty<string>();
+				float[] Colour = Array.Empty<float>();
+
+				if (Timeout(Start)) return;
+				if (broadcast == null || !broadcast.Enabled || (!broadcast.Groups.Contains(PlayerGroup) && !broadcast.Groups.Contains("*"))) continue;
+
+				string[] msgs = broadcast.Messages;
+
+				for (int i = 0; i < msgs.Length; i++)
 				{
-					string[] Groups = new string[0];
-					string[] Messages = new string[0];
-					float[] Colour = new float[0];
-
-					if (Timeout(Start)) return;
-					if (broadcast == null || !broadcast.Enabled || (!broadcast.Groups.Contains(PlayerGroup) && !broadcast.Groups.Contains("*"))) continue;
-
-					string[] msgs = broadcast.Messages;
-
-					for (int i = 0; i < msgs.Length; i++)
-					{
-						msgs[i] = msgs[i].Replace("{player}", TShock.Players[args.Who].Name);
-					}
-
-					foreach (string Word in broadcast.TriggerWords)
-					{
-						if (Timeout(Start)) return;
-						if (args.Text.Contains(Word))
-						{
-							if (broadcast.TriggerToWholeGroup && broadcast.Groups.Length > 0)
-							{
-								Groups = broadcast.Groups;
-							}
-							Messages = broadcast.Messages;
-							Colour = broadcast.ColorRGB;
-							break;
-						}
-					}
-
-					bool all = false;
-
-					foreach (string i in Groups)
-					{
-						if (i == "*")
-							all = true;
-					}
-
-					if (all)
-					{
-						Groups = new string[1] { "*" };
-					}
-
-					if (Groups.Length > 0)
-					{
-						BroadcastToGroups(Groups, Messages, Colour);
-					}
-					else
-					{
-						BroadcastToPlayer(args.Who, Messages, Colour);
-					}
+					msgs[i] = msgs[i].Replace("{player}", TShock.Players[args.Who].Name);
 				}
-		}
-		#endregion
 
-		#region RegionEnter
-		public void OnRegionEnter(RegionHooks.RegionEnteredEventArgs args)
-		{
-			var Start = DateTime.Now;
-			var PlayerGroup = args.Player.Group.Name;
-
-			lock (Config.Broadcasts)
-				foreach (Broadcast broadcast in Config.Broadcasts)
+				foreach (string Word in broadcast.TriggerWords)
 				{
 					if (Timeout(Start)) return;
-					if (broadcast == null || !broadcast.Enabled || !broadcast.Groups.Contains(PlayerGroup)) continue;
-
-					string[] msgs = broadcast.Messages;
-
-					for (int i = 0; i < msgs.Length; i++)
+					if (args.Text.Contains(Word))
 					{
-						msgs[i] = msgs[i].Replace("{player}", args.Player.Name);
-						msgs[i] = msgs[i].Replace("{region}", args.Player.CurrentRegion.Name);
-					}
-
-					foreach (string reg in broadcast.TriggerRegions)
-					{
-						if (args.Player.CurrentRegion.Name == reg)
+						if (broadcast.TriggerToWholeGroup && broadcast.Groups.Length > 0)
 						{
-							if (broadcast.RegionTrigger == "all")
-								BroadcastToAll(msgs, broadcast.ColorRGB);
-							else if (broadcast.RegionTrigger == "region")
-								BroadcastToRegion(reg, msgs, broadcast.ColorRGB);
-							else if (broadcast.RegionTrigger == "self")
-								BroadcastToPlayer(args.Player.Index, msgs, broadcast.ColorRGB);
-
+							Groups = broadcast.Groups;
 						}
+						Messages = broadcast.Messages;
+						Colour = broadcast.ColorRGB;
+						break;
 					}
-				}
-		}
-		#endregion
-
-		#region Update
-		public void OnUpdate(object Sender, EventArgs e)
-		{
-			if (Main.worldID == 0) return;
-			if (ULock) return;
-			ULock = true;
-			var Start = DateTime.Now;
-
-			int NumBroadcasts = 0;
-			lock (Config.Broadcasts)
-				NumBroadcasts = Config.Broadcasts.Length;
-			for (int i = 0; i < NumBroadcasts; i++)
-			{
-				if (Timeout(Start, UpdateTimeout)) return;
-				string[] Groups = new string[0];
-				string[] Messages = new string[0];
-				float[] Colour = new float[0];
-
-				lock (Config.Broadcasts)
-				{
-					if (Config.Broadcasts[i] == null || !Config.Broadcasts[i].Enabled || Config.Broadcasts[i].Interval < 1)
-					{
-						continue;
-					}
-					if (Config.Broadcasts[i].StartDelay > 0)
-					{
-						Config.Broadcasts[i].StartDelay--;
-						continue;
-					}
-					Config.Broadcasts[i].StartDelay = Config.Broadcasts[i].Interval; // Start Delay used as Interval Countdown
-					Groups = Config.Broadcasts[i].Groups;
-					Messages = Config.Broadcasts[i].Messages;
-					Colour = Config.Broadcasts[i].ColorRGB;
 				}
 
 				bool all = false;
 
-				foreach (string j in Groups)
+				foreach (string i in Groups)
 				{
-					if (j == "*")
+					if (i == "*")
 						all = true;
 				}
 
@@ -238,105 +142,201 @@ namespace AutoBroadcast
 				}
 				else
 				{
-					BroadcastToAll(Messages, Colour);
+					BroadcastToPlayer(args.Who, Messages, Colour);
 				}
 			}
-			ULock = false;
-		}
-		#endregion
+	}
+	#endregion
 
-		public static void BroadcastToGroups(string[] Groups, string[] Messages, float[] Colour)
-		{
-			foreach (string Line in Messages)
-			{
-				if (Line.StartsWith(TShock.Config.CommandSpecifier) || Line.StartsWith(TShock.Config.CommandSilentSpecifier))
-				{
-					Commands.HandleCommand(TSPlayer.Server, Line);
-				}
-				else
-				{
-					lock (TShock.Players)
-						foreach (var player in TShock.Players)
-						{
-							if (player != null && (Groups.Contains(player.Group.Name) || Groups[0] == "*"))
-							{
-								string msg = Line;
-								msg = msg.Replace("{player}", player.Name);
+	#region RegionEnter
+	public void OnRegionEnter(RegionHooks.RegionEnteredEventArgs args)
+	{
+		var Start = DateTime.Now;
+		var PlayerGroup = args.Player.Group.Name;
 
-								player.SendMessage(msg, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
-							}
-						}
-				}
-			}
-		}
-		public static void BroadcastToRegion(string region, string[] Messages, float[] Colour)
-		{
-			foreach (string Line in Messages)
+		lock (Config.Broadcasts)
+			foreach (Broadcast broadcast in Config.Broadcasts)
 			{
-				if (Line.StartsWith(TShock.Config.CommandSpecifier) || Line.StartsWith(TShock.Config.CommandSilentSpecifier))
+				if (Timeout(Start)) return;
+				if (broadcast == null || !broadcast.Enabled || !broadcast.Groups.Contains(PlayerGroup)) continue;
+
+				string[] msgs = broadcast.Messages;
+
+				for (int i = 0; i < msgs.Length; i++)
 				{
-					Commands.HandleCommand(TSPlayer.Server, Line);
+					msgs[i] = msgs[i].Replace("{player}", args.Player.Name);
+					msgs[i] = msgs[i].Replace("{region}", args.Player.CurrentRegion.Name);
 				}
-				else
+
+				foreach (string reg in broadcast.TriggerRegions)
 				{
-					var players = from TSPlayer plr in TShock.Players where plr != null && plr.CurrentRegion != null && plr.CurrentRegion.Name == region select plr;
-					foreach (TSPlayer plr in players)
+					if (args.Player.CurrentRegion.Name == reg)
 					{
-						plr.SendMessage(Line, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
+						if (broadcast.RegionTrigger == "all")
+							BroadcastToAll(msgs, broadcast.ColorRGB);
+						else if (broadcast.RegionTrigger == "region")
+							BroadcastToRegion(reg, msgs, broadcast.ColorRGB);
+						else if (broadcast.RegionTrigger == "self")
+							BroadcastToPlayer(args.Player.Index, msgs, broadcast.ColorRGB);
+
 					}
 				}
 			}
-		}
-		public static void BroadcastToAll(string[] Messages, float[] Colour)
+	}
+	#endregion
+
+	#region Update
+	public void OnUpdate(object Sender, EventArgs e)
+	{
+		if (Main.worldID == 0) return;
+		if (ULock) return;
+		ULock = true;
+		var Start = DateTime.Now;
+
+		int NumBroadcasts = 0;
+		lock (Config.Broadcasts)
+			NumBroadcasts = Config.Broadcasts.Length;
+		for (int i = 0; i < NumBroadcasts; i++)
 		{
-			foreach (string Line in Messages)
+			if (Timeout(Start, UpdateTimeout)) return;
+			string[] Groups = Array.Empty<string>();
+			string[] Messages = Array.Empty<string>();
+			float[] Colour = Array.Empty<float>();
+
+			lock (Config.Broadcasts)
 			{
-				if (Line.StartsWith(TShock.Config.CommandSpecifier) || Line.StartsWith(TShock.Config.CommandSilentSpecifier))
+				if (Config.Broadcasts[i] == null || !Config.Broadcasts[i].Enabled || Config.Broadcasts[i].Interval < 1)
 				{
-					Commands.HandleCommand(TSPlayer.Server, Line);
+					continue;
 				}
-				else
+				if (Config.Broadcasts[i].StartDelay > 0)
 				{
-					foreach (TSPlayer plr in TShock.Players)
+					Config.Broadcasts[i].StartDelay--;
+					continue;
+				}
+				Config.Broadcasts[i].StartDelay = Config.Broadcasts[i].Interval; // Start Delay used as Interval Countdown
+				Groups = Config.Broadcasts[i].Groups;
+				Messages = Config.Broadcasts[i].Messages;
+				Colour = Config.Broadcasts[i].ColorRGB;
+			}
+
+			bool all = false;
+
+			foreach (string j in Groups)
+			{
+				if (j == "*")
+					all = true;
+			}
+
+			if (all)
+			{
+				Groups = new string[1] { "*" };
+			}
+
+			if (Groups.Length > 0)
+			{
+				BroadcastToGroups(Groups, Messages, Colour);
+			}
+			else
+			{
+				BroadcastToAll(Messages, Colour);
+			}
+		}
+		ULock = false;
+	}
+	#endregion
+
+	public static void BroadcastToGroups(string[] Groups, string[] Messages, float[] Colour)
+	{
+		foreach (string Line in Messages)
+		{
+			if (Line.StartsWith(TShock.Config.Settings.CommandSpecifier) || Line.StartsWith(TShock.Config.Settings.CommandSilentSpecifier))
+			{
+				Commands.HandleCommand(TSPlayer.Server, Line);
+			}
+			else
+			{
+				lock (TShock.Players)
+					foreach (var player in TShock.Players)
 					{
-						if (plr != null)
+						if (player != null && (Groups.Contains(player.Group.Name) || Groups[0] == "*"))
 						{
 							string msg = Line;
-							msg = msg.Replace("{player}", plr.Name);
+							msg = msg.Replace("{player}", player.Name);
 
-							plr.SendMessage(msg, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
+							player.SendMessage(msg, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
 						}
 					}
+			}
+		}
+	}
+	public static void BroadcastToRegion(string region, string[] Messages, float[] Colour)
+	{
+		foreach (string Line in Messages)
+		{
+			if (Line.StartsWith(TShock.Config.Settings.CommandSpecifier) || Line.StartsWith(TShock.Config.Settings.CommandSilentSpecifier))
+			{
+				Commands.HandleCommand(TSPlayer.Server, Line);
+			}
+			else
+			{
+				var players = from TSPlayer plr in TShock.Players where plr != null && plr.CurrentRegion != null && plr.CurrentRegion.Name == region select plr;
+				foreach (TSPlayer plr in players)
+				{
+					plr.SendMessage(Line, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
 				}
 			}
 		}
-		public static void BroadcastToPlayer(int plr, string[] Messages, float[] Colour)
+	}
+	public static void BroadcastToAll(string[] Messages, float[] Colour)
+	{
+		foreach (string Line in Messages)
 		{
-			foreach (string Line in Messages)
+			if (Line.StartsWith(TShock.Config.Settings.CommandSpecifier) || Line.StartsWith(TShock.Config.Settings.CommandSilentSpecifier))
 			{
-				if (Line.StartsWith(TShock.Config.CommandSpecifier) || Line.StartsWith(TShock.Config.CommandSilentSpecifier))
+				Commands.HandleCommand(TSPlayer.Server, Line);
+			}
+			else
+			{
+				foreach (TSPlayer plr in TShock.Players)
 				{
-					Commands.HandleCommand(TSPlayer.Server, Line);
-				}
-				else lock (TShock.Players)
+					if (plr != null)
 					{
 						string msg = Line;
-						msg = msg.Replace("{player}", TShock.Players[plr].Name);
-						TShock.Players[plr].SendMessage(msg, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
-					}
-			}
-		}
+						msg = msg.Replace("{player}", plr.Name);
 
-		public static bool Timeout(DateTime Start, int ms = 500, bool warn = true)
-		{
-			bool ret = (DateTime.Now - Start).TotalMilliseconds >= ms;
-			if (ms == UpdateTimeout && ret) ULock = false;
-			if (warn && ret)
-			{
-				Console.WriteLine("Hook timeout detected in AutoBroadcast. You might want to report this.");
-				TShock.Log.Error("Hook timeout detected in AutoBroadcast. You might want to report this.");
+						plr.SendMessage(msg, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
+					}
+				}
 			}
-			return ret;
 		}
+	}
+	public static void BroadcastToPlayer(int plr, string[] Messages, float[] Colour)
+	{
+		foreach (string Line in Messages)
+		{
+			if (Line.StartsWith(TShock.Config.Settings.CommandSpecifier) || Line.StartsWith(TShock.Config.Settings.CommandSilentSpecifier))
+			{
+				Commands.HandleCommand(TSPlayer.Server, Line);
+			}
+			else lock (TShock.Players)
+				{
+					string msg = Line;
+					msg = msg.Replace("{player}", TShock.Players[plr].Name);
+					TShock.Players[plr].SendMessage(msg, (byte)Colour[0], (byte)Colour[1], (byte)Colour[2]);
+				}
+		}
+	}
+
+	public static bool Timeout(DateTime Start, int ms = 500, bool warn = true)
+	{
+		bool ret = (DateTime.Now - Start).TotalMilliseconds >= ms;
+		if (ms == UpdateTimeout && ret) ULock = false;
+		if (warn && ret)
+		{
+			Console.WriteLine("Hook timeout detected in AutoBroadcast. You might want to report this.");
+			TShock.Log.Error("Hook timeout detected in AutoBroadcast. You might want to report this.");
+		}
+		return ret;
 	}
 }
